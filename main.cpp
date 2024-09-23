@@ -163,6 +163,8 @@ public:
             collectInRange(root.get(), a, b, result);    
         } else {
             collectInRange(root.get(), b, a, result); 
+            std::vector<std::pair<K, V>> rev_res(result.rbegin(), result.rend());
+            return rev_res;
         }
         
         return result;
