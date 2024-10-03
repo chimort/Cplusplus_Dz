@@ -1,3 +1,5 @@
+#include "statement.h"
+
 #include <iostream>
 #include <vector>
 #include <string>
@@ -6,33 +8,8 @@
 #include <ranges>
 #include <cassert>
 #include <array>
-
-class Statement {  
-public:  
-    virtual std::vector<int> apply(std::vector<int> in) const = 0;  
-
-    Statement() = default;  
-    Statement(unsigned arguments, unsigned results, bool pure): arguments(arguments), results(results), pure(pure) {}  
-
-    virtual ~Statement() = default;  
-
-    bool is_pure() const {  
-        return pure;  
-    }  
-
-    unsigned get_arguments_count() const {  
-        return arguments;  
-    }  
-
-    unsigned get_results_count() const {  
-        return results;  
-    }  
-
-protected:  
-    unsigned arguments;  
-    unsigned results;  
-    bool pure;  
-};
+#include <algorithm>
+//#free_doorov
 
 class Combine: public Statement {
 public:
@@ -226,6 +203,7 @@ std::shared_ptr<Statement> compile(std::string_view str) {
 
 std::shared_ptr<Statement> optimize(std::shared_ptr<Statement> stmt);
 
+
 int main()
 {   
     auto plus = compile("+");
@@ -268,5 +246,19 @@ int main()
     }
     auto nop = compile("");
     assert(nop->is_pure() && nop->get_arguments_count() == 0 && nop->get_results_count() == 0);
+
+    std::vector<int> stack = {1, 2, 3};
+    auto test1 = compile("1 2 3 + -111 - * 10 %");
+    auto sixs = test1 | test1 | compile("6");
+    sixs = sixs | compile("dup");
+    for (auto i: sixs->apply(stack)) {
+        std::cout << i << " ";
+    }
+    std::cout << std::endl;
+    assert(sixs->apply(stack) == std::vector<int>({1, 2, 3, 6, 6, 6, 6}));
+
+    auto test2 = compile("-");
+    assert(test2->apply(stack) == std::vector<int>({1, -1})); 
+
     return 0;
 }
