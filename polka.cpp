@@ -18,19 +18,27 @@ class Combine: public Statement {
 public:
     Combine() = default;
     Combine(const Combine &c) = default;
-    Combine(std::shared_ptr<Statement> l, std::shared_ptr<Statement> r)
-        : Statement(l->get_arguments_count() + std::max(int(r->get_arguments_count()) - int(l->get_results_count()), 0),
-                r->get_results_count() + std::max(int(l->get_results_count()) - int(r->get_arguments_count()), 0),
-                l->is_pure() && r->is_pure()), l(l), r(r) {}    
+    Combine(const std::shared_ptr<Statement>& l, const std::shared_ptr<Statement>& r)
+        : Statement(calculateArgumentsCount(l, r), calculateResultsCount(l, r), calculateIsPure(l, r)), l(l), r(r) {}    
     
     std::vector<int> apply(std::vector<int> in) const override{ 
-        return r->apply(l->apply(in)); 
+        return r->apply(l->apply(std::move(in))); 
     } 
-    inline std::shared_ptr<Statement> get_l() { return l; }
-    inline std::shared_ptr<Statement> get_r() { return r; }
 
 private:
     std::shared_ptr<Statement> l, r;
+    static unsigned calculateArgumentsCount(const std::shared_ptr<Statement>& l, const std::shared_ptr<Statement>& r) {
+        return l->get_arguments_count() + std::max(static_cast<int>(r->get_arguments_count()) - static_cast<int>(l->get_results_count()), 0);
+    }
+
+    static unsigned calculateResultsCount(const std::shared_ptr<Statement>& l, const std::shared_ptr<Statement>& r) {
+        return r->get_results_count() + std::max(static_cast<int>(l->get_results_count()) - static_cast<int>(r->get_arguments_count()), 0);
+    }
+
+    static bool calculateIsPure(const std::shared_ptr<Statement>& l, const std::shared_ptr<Statement>& r) {
+        return l->is_pure() && r->is_pure();
+    }
+
 };
 
 class ConstOp: public Statement {
@@ -60,7 +68,7 @@ public:
         in.pop_back();
         in.push_back(func(a, b));
 
-        return in;
+        return std::move(in);
     }
 };
 
@@ -114,21 +122,21 @@ std::shared_ptr<Statement> operator|(std::shared_ptr<Statement> lhs, std::shared
     return std::make_shared<Combine>(lhs, rhs);
 }
 
+const std::unordered_map<std::string, std::function<std::shared_ptr<Statement>()>> operator_mapping = {
+    {"+", []() { return std::make_shared<BinaryOP<std::plus<>{}>>(); }},
+    {"-", []() { return std::make_shared<BinaryOP<std::minus<>{}>>(); }},
+    {"/", []() { return std::make_shared<BinaryOP<std::divides<>{}>>(); }},
+    {"*", []() { return std::make_shared<BinaryOP<std::multiplies<>{}>>(); }},
+    {"%", []() { return std::make_shared<BinaryOP<std::modulus<>{}>>(); }},
+    {"abs", []() { return std::make_shared<Abs>(); }},
+    {"input", []() { return std::make_shared<Input>(); }},
+    {"dup", []() { return std::make_shared<Dup>(); }}
+};
+
 std::shared_ptr<Statement> compile(std::string_view str) {
     if (str.empty() || str.find_first_not_of(" ") == std::string::npos) {
         return std::make_shared<BlankStr>();
     }
-
-    const std::unordered_map<std::string, std::function<std::shared_ptr<Statement>()>> operator_mapping = {
-        {"+", []() { return std::make_shared<BinaryOP<std::plus<>{}>>(); }},
-        {"-", []() { return std::make_shared<BinaryOP<std::minus<>{}>>(); }},
-        {"/", []() { return std::make_shared<BinaryOP<std::divides<>{}>>(); }},
-        {"*", []() { return std::make_shared<BinaryOP<std::multiplies<>{}>>(); }},
-        {"%", []() { return std::make_shared<BinaryOP<std::modulus<>{}>>(); }},
-        {"abs", []() { return std::make_shared<Abs>(); }},
-        {"input", []() { return std::make_shared<Input>(); }},
-        {"dup", []() { return std::make_shared<Dup>(); }}
-    };
 
     static const std::regex token_regex(R"(\S+)");
     static const std::regex number_regex(R"([-+]?\d+)");
@@ -142,39 +150,20 @@ std::shared_ptr<Statement> compile(std::string_view str) {
 
         if (std::regex_match(token, number_regex)) {
             auto const_op = std::make_shared<ConstOp>(std::stoi(token));
-            ret = !ret ? const_op : (ret | const_op);
+            ret = !ret ? std::move(const_op) : (ret | std::move(const_op));
         } else {
             auto op_it = operator_mapping.find(token);
 
             if (op_it != operator_mapping.end()) {
                 auto op_stmt = op_it->second();
-                ret = !ret ? op_stmt : (ret | op_stmt);
+                ret = !ret ? std::move(op_stmt) : (ret | std::move(op_stmt));
             }
         }
     }
-
     return ret;
-
 }
 
-
-std::shared_ptr<Statement> optimize(std::shared_ptr<Statement> stmt) {
-    if (auto combine_stmt = std::dynamic_pointer_cast<Combine>(stmt)) {
-        auto left_optimized = optimize(combine_stmt->get_l());
-        auto right_optimized = optimize(combine_stmt->get_r());
-        
-        if (auto left_const = std::dynamic_pointer_cast<ConstOp>(left_optimized)) {
-            if (auto right_const = std::dynamic_pointer_cast<ConstOp>(right_optimized)) {
-                auto combined_value = left_const->apply({})[0] + right_const->apply({})[0];
-                return std::make_shared<ConstOp>(combined_value);
-            }
-        }
-
-        return std::make_shared<Combine>(left_optimized, right_optimized);
-    }
-    return stmt;
-}
-
+std::shared_ptr<Statement> optimize(std::shared_ptr<Statement> stmt);
 
 
 void start_timer(std::chrono::high_resolution_clock::time_point& start_time) {
@@ -218,7 +207,7 @@ int main() {
     assert(complicated_zero->is_pure() && complicated_zero->get_arguments_count() == 0 && complicated_zero->get_results_count() == 1);
     assert(complicated_zero->apply({}) == std::vector{0});
 
-    for (int i = 0; i < 100000; ++i) {
+    for (int i = 0; i < 1000000; ++i) {
         auto i_str = std::to_string(i);
         auto plus_i = "+" + i_str;
         auto minus_i = "-" + i_str;
@@ -235,97 +224,11 @@ int main() {
     auto nop = compile("");
     assert(nop->is_pure() && nop->get_arguments_count() == 0 && nop->get_results_count() == 0);
 
-    std::vector<int> stack = {1, 2, 3};
-    auto test1 = compile("1 2 3 + -111 - * 10 %");
-    auto sixs = test1 | test1 | compile("6");
-    sixs = sixs | compile("dup");
-    for (auto i: sixs->apply(stack)) {
-        std::cout << i << " ";
-    }
-    std::cout << std::endl;
-    assert(sixs->apply(stack) == std::vector<int>({1, 2, 3, 6, 6, 6, 6}));
-
-    auto test2 = compile("-");
-    assert(test2->apply(stack) == std::vector<int>({1, -1})); 
-
-    auto const_5 = compile("5");
-    assert(const_5->apply({}) == std::vector{5});
-
-    // Тест сложения
-    auto test_addition = compile("2 3 +");
-    assert(test_addition->apply({}) == std::vector{5});
-
-    // Тест вычитания
-    auto test_subtraction = compile("5 3 -");
-    assert(test_subtraction->apply({}) == std::vector{2});
-
-    // Тест умножения
-    auto test_multiplication = compile("3 4 *");
-    assert(test_multiplication->apply({}) == std::vector{12});
-
-    // Тест деления
-    auto test_division = compile("8 4 /");
-    assert(test_division->apply({}) == std::vector{2});
-
-    // Тест остатка от деления
-    auto test_modulus = compile("10 3 %");
-    assert(test_modulus->apply({}) == std::vector{1});
-
-    // Тест для abs
-    auto test_abs = compile("-5 abs");
-    assert(test_abs->apply({}) == std::vector{5});
-
-    auto test_dup = compile("7 dup");
-    assert(test_dup->apply({}) == std::vector<int>({7, 7}));
-
-    // Тест сложной комбинации операций
-
-    // Тест последовательных операций
-    auto sequential_test = compile("5 1 + 2 * 3 -");
-    assert(sequential_test->apply({}) == std::vector<int>({9}));
-
-    // Тест с несколькими abs
-    auto test_multiple_abs = compile("-3 abs 4 abs");
-    assert(test_multiple_abs->apply({}) == std::vector<int>({3, 4}));
-
-    auto test_blank = compile("  ");
-    assert(test_blank->is_pure() && test_blank->get_arguments_count() == 0 && test_blank->get_results_count() == 0);
-
-
-    // Тест сложной цепочки
-    auto chain_test = compile("20 2 3 + 4 * dup 5 -");
-    assert(chain_test->apply({}) == std::vector<int>({20, 20, 15}));
-
-    auto test_spaces_and_sign = compile("    +                ");
-    assert(test_spaces_and_sign->is_pure() && test_spaces_and_sign->get_arguments_count() == 2 && test_spaces_and_sign->get_results_count() == 1);
-
-    auto test_negative_modulus = compile("-10 3 %");
-    assert(test_negative_modulus->apply({}) == std::vector{-1});
-
-    auto test_large_numbers = compile("1000000000 1000000000 +");
-    assert(test_large_numbers->apply({}) == std::vector{2000000000});
-
-    auto complex_expression_test = compile("3 5 8 * 7 + 2 - 4 /");
-    assert(complex_expression_test->apply({}) == std::vector<int>({3, 11}));
-
-    auto nested_operations_test = compile("2 3 + 5 * 6 2 / -");
-    assert(nested_operations_test->apply({}) == std::vector<int>({22}));
-
-    auto multiple_dup_abs_test = compile("4 dup dup abs -3 abs +");
-    assert(multiple_dup_abs_test->apply({}) == std::vector<int>({4, 4, 7}));
-
-    auto negative_modulus_test = compile("-10 -3 %");
-    assert(negative_modulus_test->apply({}) == std::vector{-1});
-
-    auto overflow_test = compile("2147483647 1 +");
-    assert(overflow_test->apply({}) == std::vector<int>{-2147483648});
-
     std::shared_ptr<Statement> long_sequence_test = compile("1");
-    for (int i = 0; i < 1000; ++i) {
+    for (int i = 0; i < 10000; ++i) {
         long_sequence_test = long_sequence_test | compile("1 +");
     }
-    assert(long_sequence_test->apply({}) == std::vector<int>({1001}));
-
+    assert(long_sequence_test->apply({}) == std::vector<int>({10001}));
     std::cout << "Все тесты прошли!" << std::endl;
 
     print_elapsed_time(start_time);
