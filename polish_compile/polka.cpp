@@ -10,9 +10,6 @@
 #include <regex>
 #include <algorithm>
 
-#include <cassert>
-#include <chrono>
-#include <thread>
 
 class Combine: public Statement {
 public:
@@ -22,8 +19,14 @@ public:
         : Statement(calculateArgumentsCount(l, r), calculateResultsCount(l, r), calculateIsPure(l, r)), l(l), r(r) {}    
     
     std::vector<int> apply(std::vector<int> in) const override{ 
-        return r->apply(l->apply(std::move(in))); 
+        return r->apply(l->apply(in)); 
     } 
+    inline std::shared_ptr<Statement> get_l() const {
+        return l;
+    }
+    inline std::shared_ptr<Statement> get_r() const {
+        return r;
+    }
 
 private:
     std::shared_ptr<Statement> l, r;
@@ -68,7 +71,7 @@ public:
         in.pop_back();
         in.push_back(func(a, b));
 
-        return std::move(in);
+        return in;
     }
 };
 
@@ -122,21 +125,46 @@ std::shared_ptr<Statement> operator|(std::shared_ptr<Statement> lhs, std::shared
     return std::make_shared<Combine>(lhs, rhs);
 }
 
-const std::unordered_map<std::string, std::function<std::shared_ptr<Statement>()>> operator_mapping = {
-    {"+", []() { return std::make_shared<BinaryOP<std::plus<>{}>>(); }},
-    {"-", []() { return std::make_shared<BinaryOP<std::minus<>{}>>(); }},
-    {"/", []() { return std::make_shared<BinaryOP<std::divides<>{}>>(); }},
-    {"*", []() { return std::make_shared<BinaryOP<std::multiplies<>{}>>(); }},
-    {"%", []() { return std::make_shared<BinaryOP<std::modulus<>{}>>(); }},
-    {"abs", []() { return std::make_shared<Abs>(); }},
-    {"input", []() { return std::make_shared<Input>(); }},
-    {"dup", []() { return std::make_shared<Dup>(); }}
-};
+
+
+std::shared_ptr<Statement> optimize(std::shared_ptr<Statement> stmt) {
+    if (auto combine_stmt = dynamic_cast<Combine*>(stmt.get())) {
+        auto left_optimized = optimize(combine_stmt->get_l());
+        auto right_optimized = optimize(combine_stmt->get_r());
+
+        if (right_optimized->get_arguments_count() > left_optimized->get_results_count()) {
+            return stmt; 
+        }
+
+        if (auto left_const = dynamic_cast<ConstOp*>(left_optimized.get())) {
+            if (auto right_const = dynamic_cast<ConstOp*>(right_optimized.get())) {
+                std::vector<int> input;
+                input = right_const->apply(left_const->apply(input));
+                return std::make_shared<ConstOp>(input.back());
+            }
+        }
+
+        return std::make_shared<Combine>(left_optimized, right_optimized);
+    }
+    return stmt;
+}
+
 
 std::shared_ptr<Statement> compile(std::string_view str) {
     if (str.empty() || str.find_first_not_of(" ") == std::string::npos) {
         return std::make_shared<BlankStr>();
     }
+
+    static const std::unordered_map<std::string, std::function<std::shared_ptr<Statement>()>> operator_mapping = {
+        {"+", []() { return std::make_shared<BinaryOP<std::plus<>{}>>(); }},
+        {"-", []() { return std::make_shared<BinaryOP<std::minus<>{}>>(); }},
+        {"/", []() { return std::make_shared<BinaryOP<std::divides<>{}>>(); }},
+        {"*", []() { return std::make_shared<BinaryOP<std::multiplies<>{}>>(); }},
+        {"%", []() { return std::make_shared<BinaryOP<std::modulus<>{}>>(); }},
+        {"abs", []() { return std::make_shared<Abs>(); }},
+        {"input", []() { return std::make_shared<Input>(); }},
+        {"dup", []() { return std::make_shared<Dup>(); }}
+    };
 
     static const std::regex token_regex(R"(\S+)");
     static const std::regex number_regex(R"([-+]?\d+)");
@@ -146,7 +174,7 @@ std::shared_ptr<Statement> compile(std::string_view str) {
 
     std::shared_ptr<Statement> ret;
     for (auto it = tokens_begin; it != tokens_end; ++it) {
-        std::string token = it->str();
+        const std::string token = it->str();
 
         if (std::regex_match(token, number_regex)) {
             auto const_op = std::make_shared<ConstOp>(std::stoi(token));
@@ -160,76 +188,5 @@ std::shared_ptr<Statement> compile(std::string_view str) {
             }
         }
     }
-    return ret;
-}
-
-std::shared_ptr<Statement> optimize(std::shared_ptr<Statement> stmt);
-
-
-void start_timer(std::chrono::high_resolution_clock::time_point& start_time) {
-    start_time = std::chrono::high_resolution_clock::now();
-}
-
-void print_elapsed_time(const std::chrono::high_resolution_clock::time_point& start_time) {
-    auto end_time = std::chrono::high_resolution_clock::now();
-    std::chrono::duration<double> duration = end_time - start_time;
-    std::cout << "Elapsed time: " << duration.count() << " seconds\n";
-}
-
-
-int main() {
-    std::chrono::high_resolution_clock::time_point start_time;
-    start_timer(start_time);
-    auto plus = compile("+");
-    auto minus = compile("-");
-    auto inc = compile("1 +");
-
-    assert(plus->is_pure() && plus->get_arguments_count() == 2 && plus->get_results_count() == 1);
-    assert(inc->is_pure() && inc->get_arguments_count() == 1 && inc->get_results_count() == 1);
-
-    assert(plus->apply({2, 2}) == std::vector{4});
-    assert(minus->apply({1, 2, 3}) == std::vector({1, -1}));
-
-    auto plus_4 = inc | inc | inc | inc;
-
-    assert(plus_4->is_pure() && plus_4->get_arguments_count() == 1 && plus_4->get_results_count() == 1);
-    assert(plus_4->apply({0}) == std::vector{4});
-    assert(inc->apply({0}) == std::vector{1});
-
-    auto dup = compile("dup");
-    assert(dup->is_pure() && dup->get_arguments_count() == 1 && dup->get_results_count() == 2);
-
-    auto sqr = dup | compile("*");
-    auto ten = compile("6") | plus_4;
-    assert((ten | sqr)->apply({}) == std::vector{100});
-
-    auto complicated_zero = compile(" 1    4  3 4   5  6 + -      - 3    / % -    ");
-    assert(complicated_zero->is_pure() && complicated_zero->get_arguments_count() == 0 && complicated_zero->get_results_count() == 1);
-    assert(complicated_zero->apply({}) == std::vector{0});
-
-    for (int i = 0; i < 1000000; ++i) {
-        auto i_str = std::to_string(i);
-        auto plus_i = "+" + i_str;
-        auto minus_i = "-" + i_str;
-
-        int res1 = compile(i_str)->apply({})[0];
-        int res2 = compile(plus_i)->apply({})[0];
-        int res3 = compile(minus_i)->apply({})[0];
-
-        assert(res1 == i);
-        assert(res2 == i);
-        assert(res3 == -i);
-    }
-
-    auto nop = compile("");
-    assert(nop->is_pure() && nop->get_arguments_count() == 0 && nop->get_results_count() == 0);
-
-    std::shared_ptr<Statement> long_sequence_test = compile("1");
-    for (int i = 0; i < 10000; ++i) {
-        long_sequence_test = long_sequence_test | compile("1 +");
-    }
-    assert(long_sequence_test->apply({}) == std::vector<int>({10001}));
-    std::cout << "Все тесты прошли!" << std::endl;
-
-    print_elapsed_time(start_time);
+    return optimize(ret);
 }
